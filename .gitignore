@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# model + run artifacts
+checkpoints/
+outputs/
+runs/
+wandb/
+*.safetensors
+*.bin
+*.pt
+
+# generated data (rollouts, preference pairs)
+data/generated/
+data/rollouts/
+*.jsonl
+
+.DS_Store
+.ipynb_checkpoints/
+
+# local working notes
+CLAUDE.md
