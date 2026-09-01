@@ -4,6 +4,17 @@ Extracts one predicted number from a completion and compares it to the gold
 answer. Only the post-`</think>` segment is searched, so numbers mentioned
 mid-reasoning are never mistaken for the answer.
 
+The chat template puts `<think>` in the *prompt*, so a completion never carries
+an opening tag and is inside the reasoning block from its first token. A
+completion with no `</think>` therefore never left reasoning and committed no
+answer: `no_answer`, graded incorrect. Grading such a completion on whatever
+number it happened to type last measures luck -- in the pilot it turned 4 of 90
+unfinished rollouts into false positives.
+
+`no_answer` is reported separately from a wrong answer. Both count against
+accuracy, but the rate of never-answered completions is a per-condition
+diagnostic worth reporting on its own.
+
 Prefers extracting nothing over guessing: grader failures should be countable,
 not silent. GSM8K gold answers are always plain numbers, so symbolic forms are
 not compared.
@@ -15,7 +26,6 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 
 _GOLD_MARKER = "####"
@@ -29,28 +39,33 @@ _LATEX_NOISE = (r"\left", r"\right", r"\!", r"\,", r"\;", r"\:", r"\ ", r"\$", r
 @dataclass(frozen=True)
 class GradeResult:
     """`method` is "boxed", "last_number", or "none" -- tracked so the share of
-    completions graded by the reliable path vs. the fallback is measurable."""
+    completions graded by the reliable path vs. the fallback is measurable.
+
+    `no_answer` means the completion never closed its reasoning block. Report it
+    per condition: a model that spirals less is improving for a different reason
+    than one that reasons more concisely.
+    """
 
     correct: bool
     predicted_text: str | None
     predicted_value: Decimal | None
     gold_value: Decimal | None
     method: str
+    no_answer: bool
 
 
 def answer_segment(completion: str) -> str | None:
     """Part of `completion` that should contain the final answer.
 
-    None means an unclosed reasoning block: cut off before committing to an
-    answer, which is incorrect rather than unparseable.
+    None means the reasoning block never closed, so no answer was committed.
+
+    A model trained to skip reasoning still lands in the first branch: with
+    `<think>` supplied by the prompt, it must emit `</think>` to leave the
+    block, giving a near-empty reasoning span rather than a missing tag.
     """
     if THINK_CLOSE in completion:
         return completion.rsplit(THINK_CLOSE, 1)[1]
-    if THINK_OPEN in completion:
-        return None
-    # No reasoning block at all. A real case to grade, not a malformed one --
-    # a length-optimized model skipping reasoning is a result we expect.
-    return completion
+    return None
 
 
 def _strip_latex(text: str) -> str:
@@ -166,6 +181,7 @@ def grade(completion: str, gold: str) -> GradeResult:
         predicted_value=predicted_value,
         gold_value=gold_value,
         method=method,
+        no_answer=THINK_CLOSE not in completion,
     )
 
 

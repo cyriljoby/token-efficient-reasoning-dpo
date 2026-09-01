@@ -86,8 +86,16 @@ def test_segment_none_when_think_never_closes():
     assert answer_segment("<think>ran out of budget mid-thought 42") is None
 
 
-def test_segment_is_whole_text_when_no_think_block():
-    assert answer_segment("The answer is 18.") == "The answer is 18."
+def test_segment_none_when_no_close_tag():
+    """The template supplies `<think>`, so a completion with no `</think>` is
+    still inside its reasoning and has committed no answer."""
+    assert answer_segment("The answer is 18.") is None
+
+
+def test_skipping_reasoning_still_yields_an_answer():
+    """A model trained to reason less emits `</think>` immediately rather than
+    omitting it, so the zero-reasoning case still grades normally."""
+    assert answer_segment("</think>The answer is 18.") == "The answer is 18."
 
 
 # --- prediction extraction -------------------------------------------------
@@ -163,7 +171,7 @@ def test_unclosed_think_block_extracts_nothing():
         "<think>work</think>The answer is 18.00 eggs.",
         "<think>work</think>She makes $18 per day.",
         r"<think>work</think>\boxed{18.0}",
-        "The answer is 18.",  # no reasoning block at all
+        "</think>The answer is 18.",  # reasoning skipped entirely
     ],
 )
 def test_correct_completions(completion):
@@ -178,10 +186,38 @@ def test_correct_completions(completion):
         "<think>reasoning mentions 18 but never finishes",  # truncated
         "<think>work</think>I cannot determine this.",
         r"<think>work</think>\boxed{eighteen}",
+        "The answer is 18.",  # no `</think>`: never left reasoning
     ],
 )
 def test_incorrect_completions(completion):
     assert not grade(completion, GOLD_SOLUTION).correct
+
+
+# --- no_answer -------------------------------------------------------------
+
+
+def test_no_answer_flagged_when_reasoning_never_closes():
+    result = grade("<think>still working on it", GOLD_SOLUTION)
+    assert result.no_answer
+    assert not result.correct
+
+
+def test_no_answer_false_once_reasoning_closes():
+    result = grade("<think>w</think>The answer is 18.", GOLD_SOLUTION)
+    assert not result.no_answer
+    assert result.correct
+
+
+def test_spiralling_completion_is_not_graded_on_its_reasoning():
+    """Regression from the pilot: an unfinished completion that happens to type
+    the right number mid-reasoning must not be scored correct."""
+    spiral = (
+        "The discount is on the amount over $100, so 10% of $20 is $2, "
+        "giving $118.\n\nBut wait,"
+    )
+    result = grade(spiral, "#### 118")
+    assert result.no_answer
+    assert not result.correct
 
 
 def test_thousands_separator_end_to_end():
