@@ -26,6 +26,9 @@ from evaluation.tokens import count_tokens
 
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
+# Ada (RTX 4090) and Apple silicon both support bfloat16.
+DTYPE = "bfloat16"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -43,8 +46,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     # hf for local tests, vllm for real runs on a cuda box
     parser.add_argument("--backend", choices=("hf", "vllm"), default="hf")
-    # bfloat16 needs Ampere or newer. T4 and other pre-Ampere cards need float16.
-    parser.add_argument("--dtype", default="bfloat16", choices=("bfloat16", "float16"))
     # vLLM returns a chunk only when all its prompts finish; smaller chunks
     # checkpoint more often, larger ones batch better.
     parser.add_argument("--chunk-size", type=int, default=200)
@@ -54,11 +55,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def done_prompts(path: Path) -> set[int]:
-    """Prompt indices already written, so an interrupted run can continue."""
+    """Prompt indices already written, so an interrupted run can continue.
+
+    A run killed mid-chunk can leave a half-written final line. Skip it rather
+    than crash: resume exists for exactly that situation.
+    """
     if not path.exists():
         return set()
+    done = set()
     with path.open() as handle:
-        return {json.loads(line)["prompt_index"] for line in handle if line.strip()}
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                done.add(json.loads(line)["prompt_index"])
+            except json.JSONDecodeError:
+                continue
+    return done
 
 
 class HFBackend:
@@ -68,6 +81,7 @@ class HFBackend:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        torch.manual_seed(args.seed)
         self.torch = torch
         # loads correct tokenizer for the model
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -79,7 +93,7 @@ class HFBackend:
         )
         # loads correct model for the model, with correct dtype
         self.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, dtype=getattr(torch, args.dtype)
+            MODEL_NAME, dtype=getattr(torch, DTYPE)
         )
         self.model.to(self.device)
         self.model.eval()
@@ -88,7 +102,7 @@ class HFBackend:
     def generate(self, prompts: list[str]) -> list[list[tuple[list[int], bool]]]:
         eos_id = self.tokenizer.eos_token_id
         results = []
-        # one prompt at at a time
+        # one prompt at a time
         for prompt in prompts:
             # tokenize the prompt and move to the correct device
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -127,7 +141,7 @@ class VLLMBackend:
         # select correct tokenizer for the model
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         # select correct model for the model, with correct dtype and seed
-        self.llm = LLM(model=MODEL_NAME, dtype=args.dtype, seed=args.seed)
+        self.llm = LLM(model=MODEL_NAME, dtype=DTYPE, seed=args.seed)
         # bundle all the sampling parameter together
         self.params = SamplingParams(
             n=args.n_rollouts,
@@ -138,7 +152,7 @@ class VLLMBackend:
     def generate(self, prompts: list[str]) -> list[list[tuple[list[int], bool]]]:
         # All prompts submitted at once
         outputs = self.llm.generate(prompts, self.params)
-        # vllm tells you provides a finish_reason for each rollout, so you don't have to sniff for EOS
+        # vllm provides a finish_reason for each rollout, so no need to sniff for EOS
         return [
             [
                 (list(completion.token_ids), completion.finish_reason == "length")
@@ -164,8 +178,8 @@ def main() -> None:
     if already:
         print(f"resuming: {len(already)} prompts already done, {len(todo)} to go")
 
-    print(f"backend={args.backend} dtype={args.dtype} "
-          f"{len(todo)} prompts x {args.n_rollouts} rollouts -> {args.out}")
+    print(f"backend={args.backend} {len(todo)} prompts "
+          f"x {args.n_rollouts} rollouts -> {args.out}")
 
     started = time.time()
     with args.out.open("a" if args.resume else "w") as handle:

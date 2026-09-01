@@ -23,3 +23,6 @@ data/rollouts/
 
 # local working notes
 CLAUDE.md
+
+# generated pair sets
+data/pairs/
