@@ -44,6 +44,10 @@ def parse_args() -> argparse.Namespace:
     # Rank is the honest limitation: a weak result and too small an r are not
     # separable from one run.
     parser.add_argument("--lora-r", type=int, default=16)
+    # sigmoid is vanilla DPO. sigmoid_norm divides each side's log-ratio by its
+    # completion length -- the length-normalized comparison for RQ3, changing
+    # one thing so a difference is attributable to normalization alone.
+    parser.add_argument("--loss-type", choices=("sigmoid", "sigmoid_norm"), default="sigmoid")
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
@@ -119,8 +123,10 @@ def build_training_config(args) -> DPOConfig:
     """
     return DPOConfig(
         output_dir=args.output_dir,
-        # vanilla DPO -- validated against tests/test_dpo_loss_vs_trl.py
-        loss_type="sigmoid",
+        # sigmoid is vanilla DPO, validated against tests/test_dpo_loss_vs_trl.py;
+        # sigmoid_norm is its length-normalized counterpart, matching
+        # average_log_prob=True in dpo_loss.py
+        loss_type=args.loss_type,
         beta=args.beta,
         learning_rate=args.learning_rate,
         num_train_epochs=args.epochs,
@@ -152,6 +158,14 @@ def main() -> None:
             f"EOS_TOKEN {EOS_TOKEN!r} does not match the tokenizer's "
             f"{tokenizer.eos_token!r}; stop tokens would survive into training text"
         )
+
+    # Normalizing divides the delta by completion length (~400 tokens here), so
+    # the same beta gives a signal roughly 400x weaker and nothing moves.
+    # SimPO-style objectives use beta in the 2-10 range for this reason.
+    if args.loss_type == "sigmoid_norm" and args.beta < 1.0:
+        print(f"WARNING: loss_type=sigmoid_norm with beta={args.beta}. "
+              f"Length-normalized deltas are ~1/400 the scale of unnormalized "
+              f"ones; consider --beta 2.0 or higher.")
 
     dataset = load_pairs(args.pairs, tokenizer)
     print(f"{len(dataset)} pairs from {args.pairs}")
